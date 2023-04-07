@@ -29,7 +29,7 @@ namespace {
   const byte hum_temp_ec[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x05, 0xCB};
 }
 
-byte sensorResponse[12] = {0};
+byte sensorResponse[13] = {0};
 
 SoftwareSerial mod(D6, D5); // RX, TX
 WiFiClient espClient;
@@ -69,6 +69,15 @@ void connectNetwork() {
       delay(5000);
     }
   }
+}
+
+// Calculate CRC
+uint8_t calculateCRC(const byte *data, size_t len) {
+  uint8_t crc = 0;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+  }
+  return crc;
 }
 
 void publishSensorData(float soil_hum, float soil_temp, int soil_ec, float soil_pore_water_ec, float soil_bulk_permittivity) {
@@ -114,13 +123,19 @@ void loop() {
     if (mod.write(hum_temp_ec, sizeof(hum_temp_ec)) == 8) {
       digitalWrite(DE_PIN, LOW);
       digitalWrite(RE_PIN, LOW);
-      for (byte i = 0; i < 12; i++) {
+      for (byte i = 0; i < 13; i++) {
         sensorResponse[i] = mod.read();
         yield();
       }
     }
 
     delay(250);
+    
+    // Simple CRC Check
+    if (calculateCRC(sensorResponse, 12) != sensorResponse[12]) {
+      Serial.println(F("CRC check failed. Skipping this iteration."));
+      return;
+    }
 
     // Sensor Response Data
     float soil_hum = 0.1 * int(sensorResponse[3] << 8 | sensorResponse[4]);
