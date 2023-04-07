@@ -8,26 +8,28 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 
-// Replace with your WiFi and MQTT credentials
-const char* ssid = "your_ssid";
-const char* password = "your_password";
-const char* mqtt_server = "your_mqtt_server";
-const char* mqtt_user = "your_mqtt_user";
-const char* mqtt_password = "your_mqtt_password";
-const char* mqtt_topic = "mycodo/sensors";
+namespace {
+  // Replace with your WiFi and MQTT credentials
+  const char* ssid = "your_ssid";
+  const char* password = "your_password";
+  const char* mqtt_server = "your_mqtt_server";
+  const char* mqtt_user = "your_mqtt_user";
+  const char* mqtt_password = "your_mqtt_password";
+  const char* mqtt_topic = "mycodo/sensors";
 
-const float TEMP_CORRECTION = 0.5;
-const float HUM_CORRECTION = 0.8;
-const float EC_SLOPE = 1.93;
-const float EC_INTERCEPT = -270.8;
-const float EC_TEMP_COEFF = 0.019;
+  const float TEMP_CORRECTION = 0.5;
+  const float HUM_CORRECTION = 0.8;
+  const float EC_SLOPE = 1.93;
+  const float EC_INTERCEPT = -270.8;
+  const float EC_TEMP_COEFF = 0.019;
 
-#define RE D2
-#define DE D3
+  const byte RE_PIN = D2;
+  const byte DE_PIN = D3;
 
-const byte hum_temp_ec[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x05, 0xCB};
-byte sensorResponse[12] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-byte sensor_values[11];
+  const byte hum_temp_ec[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x05, 0xCB};
+}
+
+byte sensorResponse[12] = {0};
 
 SoftwareSerial mod(D6, D5); // RX, TX
 WiFiClient espClient;
@@ -36,8 +38,8 @@ PubSubClient client(espClient);
 unsigned long previousMillis = 0;
 const unsigned long interval = 5000;
 
-// Create Instance of WiFi and MQTT client
-void connectWiFi() {
+// Connect to WiFi and MQTT Server
+void connectNetwork() {
   Serial.print(F("Connecting to "));
   Serial.println(ssid);
 
@@ -52,9 +54,7 @@ void connectWiFi() {
   Serial.println(F("WiFi connected"));
   Serial.print(F("IP address: "));
   Serial.println(WiFi.localIP());
-}
 
-void connectMQTT() {
   client.setServer(mqtt_server, 1883);
 
   while (!client.connected()) {
@@ -71,43 +71,54 @@ void connectMQTT() {
   }
 }
 
-void setup() {
-    Serial.begin(115200);
-    pinMode(RE, OUTPUT);
-    pinMode(DE, OUTPUT);
-    digitalWrite(RE, LOW);
-    digitalWrite(DE, LOW);
-    delay(1000);
-    mod.begin(4800);
-    delay(100);
+void publishSensorData(float soil_hum, float soil_temp, int soil_ec, float soil_pore_water_ec, float soil_bulk_permittivity) {
+  // Reconnect to MQTT server if disconnected
+  if (!client.connected()) {
+    connectNetwork();
+  }
 
-    // Connect to WiFi and MQTT Server
-    connectWiFi();
-    connectMQTT();
+  // Create a character array to store the payload. Format the payload using snprintf()
+  char payload[256];
+  snprintf(payload, sizeof(payload), "{\"Humidity\":%.2f,\"Temperature\":%.2f,\"EC\":%d,\"pwEC\":%.2f,\"soil_bulk_permittivity\":%.2f}",
+          soil_hum, soil_temp, soil_ec, soil_pore_water_ec, soil_bulk_permittivity);
+
+  // Publish the payload to the MQTT server
+  client.publish(mqtt_topic, payload);
 }
 
-// Soil EC Reading
+void setup() {
+  Serial.begin(115200);
+  pinMode(RE_PIN, OUTPUT);
+  pinMode(DE_PIN, OUTPUT);
+  digitalWrite(RE_PIN, LOW);
+  digitalWrite(DE_PIN, LOW);
+  delay(1000);
+  mod.begin(4800);
+  delay(100);
+
+  // Connect to WiFi and MQTT Server
+  connectNetwork();
+}
+
 void loop() {
   unsigned long currentMillis = millis();
 
   if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
+    previousMillis = currentMillis
 
-    digitalWrite(DE, HIGH);
-    digitalWrite(RE, HIGH);
-    memset(sensor_values, 0, sizeof(sensor_values));
+    digitalWrite(DE_PIN, HIGH);
+    digitalWrite(RE_PIN, HIGH);
+    memset(sensorResponse, 0, sizeof(sensorResponse));
     delay(100);
-    
-    if (mod.write(hum_temp_ec, sizeof(hum_temp_ec)) == 8) {
-        digitalWrite(DE, LOW);
-        digitalWrite(RE, LOW);
-        for (byte i = 0; i < 12; i++) {
-            sensorResponse[i] = mod.read();
-            yield();
-        }
-    }
-  }
 
+    if (mod.write(hum_temp_ec, sizeof(hum_temp_ec)) == 8) {
+      digitalWrite(DE_PIN, LOW);
+      digitalWrite(RE_PIN, LOW);
+      for (byte i = 0; i < 12; i++) {
+        sensorResponse[i] = mod.read();
+        yield();
+      }
+    }
 
     delay(250);
 
@@ -116,6 +127,7 @@ void loop() {
     float soil_temp = 0.1 * int(sensorResponse[5] << 8 | sensorResponse[6]);
     int soil_ec = int(sensorResponse[7] << 8 | sensorResponse[8]);
 
+    // EC, Humidity, and Temperature Correction
     // Soil EC Equations obtained from calibration using distilled water and a 1.1178 mS/cm solution
     soil_ec = EC_SLOPE * soil_ec + EC_INTERCEPT;
     soil_ec = soil_ec / (1.0 + EC_TEMP_COEFF * (soil_temp - 25));
@@ -131,12 +143,12 @@ void loop() {
     float soil_bulk_permittivity = soil_apparent_dieletric_constant;
     float soil_pore_permittivity = 80.3 / (1.0 + 0.06 * (soil_temp - 25.0));
 
-    // Convert Bulk EC to Pore Water EC using Briciu-Burghina 2022
+    // Calculate soil pore water EC using the Briciu-Burghina 2022 model
     float soil_pore_water_ec;
     if (soil_bulk_permittivity > 5.5)
-        soil_pore_water_ec = (soil_ec * (soil_pore_permittivity - 5.5)) / (soil_bulk_permittivity - 5.5) / 1000.0;
+      soil_pore_water_ec = (soil_ec * (soil_pore_permittivity - 5.5)) / (soil_bulk_permittivity - 5.5) / 1000.0;
     else
-        soil_pore_water_ec = 0.0;
+      soil_pore_water_ec = 0.0;
 
     Serial.print(F("Humidity:"));
     Serial.print(soil_hum);
@@ -148,20 +160,8 @@ void loop() {
     Serial.print(soil_pore_water_ec);
     Serial.print(F(",soil_bulk_permittivity:"));
     Serial.println(soil_bulk_permittivity);
-    
-    // Reconnect to MQTT if connection is lost
-    if (!client.connected()) {
-        connectMQTT();
-    }
 
-  // Create a character array to store the payload
-  char payload[256];
-
-  // Format the payload using snprintf()
-  snprintf(payload, sizeof(payload), "{\"Humidity\":%.2f,\"Temperature\":%.2f,\"EC\":%d,\"pwEC\":%.2f,\"soil_bulk_permittivity\":%.2f}",
-          soil_hum, soil_temp, soil_ec, soil_pore_water_ec, soil_bulk_permittivity);
-
-  // Publish the payload to the MQTT server
-  client.publish(mqtt_topic, payload);
-
+    // Publish sensor data to MQTT Server
+    publishSensorData(soil_hum, soil_temp, soil_ec, soil_pore_water_ec, soil_bulk_permittivity);
   }
+}
