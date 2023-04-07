@@ -154,7 +154,14 @@ void loop() {
         connectMQTT();
     }
 
-    // Publish sensor values to the MQTT server
-    String payload = String("Humidity:") + soil_hum + ",Temperature:" + soil_temp + ",EC:" + soil_ec + ",pwEC:" + soil_pore_water_ec + ",soil_bulk_permittivity:" + soil_bulk_permittivity;
-    client.publish(mqtt_topic, payload.c_str());
+  // Create a character array to store the payload
+  char payload[256];
+
+  // Format the payload using snprintf()
+  snprintf(payload, sizeof(payload), "{\"Humidity\":%.2f,\"Temperature\":%.2f,\"EC\":%d,\"pwEC\":%.2f,\"soil_bulk_permittivity\":%.2f}",
+          soil_hum, soil_temp, soil_ec, soil_pore_water_ec, soil_bulk_permittivity);
+
+  // Publish the payload to the MQTT server
+  client.publish(mqtt_topic, payload);
+
   }
